@@ -1,11 +1,17 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import ImageDisplay from './ImageDisplay';
 import './ModelResults.css';
 
 function ModelResults({ result, datasetName }) {
-  const [classificationImageUrl, setClassificationImageUrl] = useState(null);
+  const [classificationResult, setClassificationResult] = useState(null);
   const [loadingClassification, setLoadingClassification] = useState(false);
   const [classificationError, setClassificationError] = useState(null);
+
+  // Clear classification results when dataset or result changes
+  useEffect(() => {
+    setClassificationResult(null);
+    setClassificationError(null);
+  }, [datasetName, result?.hsi_path]);
 
   if (!result) return null;
 
@@ -31,9 +37,15 @@ function ModelResults({ result, datasetName }) {
   };
 
   const handleClassifyClick = async () => {
+    if (!result.hsi_path || !result.gt_path || !datasetName) {
+      setClassificationError('Missing required information for classification');
+      return;
+    }
+
     setLoadingClassification(true);
     setClassificationError(null);
-    setClassificationImageUrl(null);
+    setClassificationResult(null);
+    
     try {
       const response = await fetch('http://localhost:5000/classify', {
         method: 'POST',
@@ -44,14 +56,26 @@ function ModelResults({ result, datasetName }) {
           dataset_name: datasetName
         })
       });
+      
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Server error: ${text}`);
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(errorData.error || `Server error: ${response.status}`);
       }
+      
       const data = await response.json();
-      setClassificationImageUrl(data.classification_image_url);
+      
+      // Store complete classification results
+      setClassificationResult({
+        classification_image_url: data.classification_image_url,
+        confusion_matrix_url: data.confusion_matrix_url,
+        tsne_image_url: data.tsne_image_url,
+        anomaly_score_map_url: data.anomaly_score_map_url,
+        classification_report_url: data.classification_report_url,
+        anomaly_stats: data.anomaly_stats || {}
+      });
     } catch (error) {
       setClassificationError(error.message || 'Classification failed');
+      setClassificationResult(null);
     } finally {
       setLoadingClassification(false);
     }
@@ -90,6 +114,77 @@ function ModelResults({ result, datasetName }) {
           </button>
           {classificationError && <p className="error-message">{classificationError}</p>}
           
+          {/* Display classification results only after button click */}
+          {classificationResult && (
+            <div className="classification-results">
+              <h3>Classification Results - {datasetName.toUpperCase()}</h3>
+              
+              {classificationResult.anomaly_stats && (
+                <div className="classification-stats">
+                  <p><strong>Anomalies Detected:</strong> {classificationResult.anomaly_stats.anomalies_detected || 'N/A'} ({classificationResult.anomaly_stats.anomaly_percentage?.toFixed(1) || 'N/A'}%)</p>
+                  <p><strong>Misclassifications:</strong> {classificationResult.anomaly_stats.misclassifications || 'N/A'}</p>
+                </div>
+              )}
+              
+              <div className="classification-images">
+                {classificationResult.classification_image_url && (
+                  <div className="classification-image-item">
+                    <h4>Anomaly Overlay Map</h4>
+                    <img 
+                      src={classificationResult.classification_image_url.startsWith('http') 
+                        ? classificationResult.classification_image_url 
+                        : `http://localhost:5000${classificationResult.classification_image_url}`} 
+                      alt={`Anomaly Classification Map - ${datasetName}`}
+                      className="classification-image"
+                      key={`overlay-${datasetName}`}
+                    />
+                  </div>
+                )}
+                
+                {classificationResult.confusion_matrix_url && (
+                  <div className="classification-image-item">
+                    <h4>Confusion Matrix</h4>
+                    <img 
+                      src={classificationResult.confusion_matrix_url.startsWith('http') 
+                        ? classificationResult.confusion_matrix_url 
+                        : `http://localhost:5000${classificationResult.confusion_matrix_url}`} 
+                      alt={`Confusion Matrix - ${datasetName}`}
+                      className="classification-image"
+                      key={`confusion-${datasetName}`}
+                    />
+                  </div>
+                )}
+                
+                {classificationResult.tsne_image_url && (
+                  <div className="classification-image-item">
+                    <h4>t-SNE Visualization</h4>
+                    <img 
+                      src={classificationResult.tsne_image_url.startsWith('http') 
+                        ? classificationResult.tsne_image_url 
+                        : `http://localhost:5000${classificationResult.tsne_image_url}`} 
+                      alt={`t-SNE Visualization - ${datasetName}`}
+                      className="classification-image"
+                      key={`tsne-${datasetName}`}
+                    />
+                  </div>
+                )}
+                
+                {classificationResult.anomaly_score_map_url && (
+                  <div className="classification-image-item">
+                    <h4>Anomaly Score Map</h4>
+                    <img 
+                      src={classificationResult.anomaly_score_map_url.startsWith('http') 
+                        ? classificationResult.anomaly_score_map_url 
+                        : `http://localhost:5000${classificationResult.anomaly_score_map_url}`} 
+                      alt={`Anomaly Score Map - ${datasetName}`}
+                      className="classification-image"
+                      key={`anomaly-map-${datasetName}`}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

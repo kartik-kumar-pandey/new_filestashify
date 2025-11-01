@@ -17,7 +17,6 @@ function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  const [showShortcuts, setShowShortcuts] = useState(false);
   const [activeSection, setActiveSection] = useState('home');
 
   const showToast = useCallback((message, type = 'info') => {
@@ -30,15 +29,8 @@ function App() {
 
   const toggleHelp = useCallback(() => {
     setShowHelp(prev => !prev);
-    setShowShortcuts(false);
     showToast(showHelp ? 'Help panel closed' : 'Help panel opened', 'info');
   }, [showHelp, showToast]);
-
-  const toggleShortcuts = useCallback(() => {
-    setShowShortcuts(prev => !prev);
-    setShowHelp(false);
-    showToast(showShortcuts ? 'Shortcuts panel closed' : 'Shortcuts panel opened', 'info');
-  }, [showShortcuts, showToast]);
 
   const toggleDarkMode = useCallback(() => {
     setDarkMode(prev => !prev);
@@ -70,15 +62,11 @@ function App() {
         event.preventDefault();
         toggleHelp();
       }
-      if ((event.ctrlKey || event.metaKey) && event.key === 's') {
-        event.preventDefault();
-        toggleShortcuts();
-      }
     };
 
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
-  }, [toast, toggleDarkMode, handleToastClose, toggleHelp, toggleShortcuts]);
+  }, [toast, toggleDarkMode, handleToastClose, toggleHelp]);
 
   const announceStatus = useCallback((message) => {
     const announcement = document.createElement('div');
@@ -157,12 +145,9 @@ function App() {
     }
     setResult(results);
     showToast('Upload successful! Results are ready.', 'success');
-
-    if (results.hsi_path && results.gt_path && selectedDataset) {
-      callClassifyEndpoint(results.hsi_path, results.gt_path, selectedDataset);
-    } else {
-      showToast('Missing file paths or dataset name for classification', 'error');
-    }
+    
+    // Clear any previous classification results - classification should only run when button is clicked
+    setClassificationResult(null);
   }, [selectedDataset, callClassifyEndpoint, showToast]);
 
   const handleUploadFailure = useCallback((error) => {
@@ -171,6 +156,10 @@ function App() {
 
   const handleDatasetChange = useCallback((dataset) => {
     setSelectedDataset(dataset);
+    // Clear classification results when dataset changes
+    setClassificationResult(null);
+    // Also clear upload results to prevent showing wrong dataset images
+    setResult(null);
     showToast(`Dataset changed to: ${dataset}`, 'info');
   }, [showToast]);
 
@@ -207,9 +196,6 @@ function App() {
           </button>
           <button type="button" onClick={toggleHelp} className={`nav-link ${showHelp ? 'is-active' : ''}`}>
             Help
-          </button>
-          <button type="button" onClick={toggleShortcuts} className={`nav-link ${showShortcuts ? 'is-active' : ''}`}>
-            Shortcuts
           </button>
         </nav>
         <div className="header-actions">
@@ -385,20 +371,6 @@ function App() {
                 ) : (
                   <>
                     <ModelResults result={result} datasetName={selectedDataset} />
-                    {classificationResult && classificationResult.classification_image_url && (
-                      <div className="analysis-card classification-card">
-                        <div className="analysis-card__header">
-                          <h3>Classification Result</h3>
-                        </div>
-                        <div className="analysis-card__body">
-                          <img
-                            src={classificationResult.classification_image_url}
-                            alt="Classification result"
-                            className="analysis-image"
-                          />
-                        </div>
-                      </div>
-                    )}
                   </>
                 )}
               </div>
@@ -458,7 +430,6 @@ function App() {
                 <h3>Features</h3>
                 <ul>
                   <li>Light and dark workspace modes.</li>
-                  <li>Keyboard shortcuts for power users.</li>
                   <li>Backend health indicators with live status checks.</li>
                   <li>Toast notifications for progress and errors.</li>
                 </ul>
@@ -473,44 +444,6 @@ function App() {
         </div>
       )}
 
-      {showShortcuts && (
-        <div className="overlay-panel" role="dialog" aria-modal="true" aria-labelledby="shortcuts-heading">
-          <div className="panel-card">
-            <div className="panel-card__header">
-              <h2 id="shortcuts-heading">Keyboard shortcuts</h2>
-            </div>
-            <div className="panel-card__body shortcuts-content">
-              <div className="shortcut-item">
-                <kbd>Ctrl/Cmd</kbd>
-                <span className="shortcut-symbol">+</span>
-                <kbd>D</kbd>
-                <span>Toggle dark mode</span>
-              </div>
-              <div className="shortcut-item">
-                <kbd>Ctrl/Cmd</kbd>
-                <span className="shortcut-symbol">+</span>
-                <kbd>H</kbd>
-                <span>Show or hide help</span>
-              </div>
-              <div className="shortcut-item">
-                <kbd>Ctrl/Cmd</kbd>
-                <span className="shortcut-symbol">+</span>
-                <kbd>S</kbd>
-                <span>Show or hide shortcuts</span>
-              </div>
-              <div className="shortcut-item">
-                <kbd>Esc</kbd>
-                <span>Dismiss toast notifications</span>
-              </div>
-            </div>
-            <div className="panel-card__footer">
-              <button type="button" className="primary-button" onClick={toggleShortcuts}>
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

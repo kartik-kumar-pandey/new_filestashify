@@ -38,17 +38,41 @@ def extract_patches(data, gt, patch_size):
     padded_data = np.pad(data, ((margin, margin), (margin, margin), (0, 0)), mode='reflect')
     padded_gt = np.pad(gt, ((margin, margin), (margin, margin)), mode='reflect')
 
-    shape = (h, w, patch_size, patch_size, c)
-    strides = (padded_data.strides[0], padded_data.strides[1], padded_data.strides[0], padded_data.strides[1], padded_data.strides[2])
-    patches = np.lib.stride_tricks.as_strided(padded_data, shape=shape, strides=strides)
-    patches = patches.reshape(-1, patch_size, patch_size, c)
-
-    gt_flat = padded_gt[margin:margin+h, margin:margin+w].flatten()
-
-    idx = np.where(gt_flat != 0)[0]
-    patches = patches[idx]
-    labels = gt_flat[idx]
-    coords = np.array([(i // w, i % w) for i in idx])
+    # Only extract patches for pixels with valid labels (label != 0)
+    # This is much more memory efficient than creating all patches and filtering
+    patches_list = []
+    labels_list = []
+    coords_list = []
+    
+    for i in range(margin, margin + h):
+        for j in range(margin, margin + w):
+            label = padded_gt[i, j]
+            if label != 0:  # Only process labeled pixels
+                # Extract patch: [i-margin:i+margin, j-margin:j+margin, :]
+                # This gives patch_size × patch_size × channels
+                # Note: i+margin is exclusive, so [i-margin:i+margin] gives margin*2 = patch_size elements
+                patch = padded_data[i - margin:i + margin, j - margin:j + margin, :]
+                # Verify patch shape
+                if patch.shape[:2] != (patch_size, patch_size):
+                    raise ValueError(f"Patch shape mismatch at ({i-margin}, {j-margin}): "
+                                   f"expected ({patch_size}, {patch_size}), got {patch.shape[:2]}. "
+                                   f"margin={margin}, slice=[{i-margin}:{i+margin}]")
+                patches_list.append(patch)
+                labels_list.append(label)
+                coords_list.append((i - margin, j - margin))
+    
+    if len(patches_list) == 0:
+        raise ValueError("No valid labeled pixels found in ground truth data")
+    
+    patches = np.array(patches_list, dtype=np.float32)
+    labels = np.array(labels_list)
+    coords = np.array(coords_list)
+    
+    # Ensure patches shape is correct: (num_patches, patch_size, patch_size, channels)
+    # The patches are already in the correct shape from the loop extraction
+    if len(patches.shape) != 4:
+        raise ValueError(f"Expected patches shape (N, {patch_size}, {patch_size}, {c}), got {patches.shape}")
+    
     return patches, labels, coords, h, w
 
 class PatchAutoencoder(nn.Module):
@@ -89,38 +113,145 @@ class SimpleTransformer(nn.Module):
         return scores
 
 def visualize_latent_space(z, labels, dataset_name, output_dir):
+    """
+    Visualize the latent space using t-SNE.
+    Memory-efficient: samples data if too large and uses PCA preprocessing.
+    """
+    # Memory optimization: use smaller sample size for better memory efficiency
+    MAX_SAMPLES = 5000  # Conservative limit to avoid memory issues with t-SNE
+    
+    if len(z) > MAX_SAMPLES:
+        print(f"Sampling {MAX_SAMPLES} from {len(z)} samples for t-SNE visualization (memory optimization)")
+        # Stratified sampling to preserve label distribution
+        try:
+            z_sample, _, labels_sample, _ = train_test_split(
+                z, labels, 
+                train_size=MAX_SAMPLES, 
+                stratify=labels, 
+                random_state=42
+            )
+        except (ValueError, Exception):
+            # If stratification fails, use random sampling
+            indices = np.random.choice(len(z), size=min(MAX_SAMPLES, len(z)), replace=False)
+            z_sample = z[indices]
+            labels_sample = labels[indices]
+    else:
+        z_sample = z
+        labels_sample = labels
+    
+    # Additional PCA preprocessing to reduce dimensionality before t-SNE
+    # This helps with memory efficiency
+    if z_sample.shape[1] > 50:
+        print("Applying PCA preprocessing to reduce dimensionality before t-SNE")
+        pca_pre = PCA(n_components=min(50, z_sample.shape[1]))
+        z_sample = pca_pre.fit_transform(z_sample)
+    
+    # Calculate safe perplexity (must be < n_samples)
+    n_samples = len(z_sample)
+    safe_perplexity = min(30, max(5, n_samples // 4))  # Use 25% of samples as perplexity, but cap at 30
+    
     tsne_signature = inspect.signature(TSNE.__init__)
     tsne_params = {
         'n_components': 2,
+        'perplexity': safe_perplexity,
         'random_state': 42,
-        'init': 'pca'
+        'init': 'pca',
+        'method': 'barnes_hut'  # Use Barnes-Hut approximation for memory efficiency
     }
 
     if 'learning_rate' in tsne_signature.parameters:
-        tsne_params['learning_rate'] = 'auto'
+        tsne_params['learning_rate'] = 200  # Use numeric value instead of 'auto' for better compatibility
 
     if 'n_iter' in tsne_signature.parameters:
-        tsne_params['n_iter'] = 500
+        tsne_params['n_iter'] = 300  # Reduced iterations for faster processing
     elif 'max_iter' in tsne_signature.parameters:
-        tsne_params['max_iter'] = 500
+        tsne_params['max_iter'] = 300
 
     try:
         tsne = TSNE(**tsne_params)
-    except TypeError:
+    except (TypeError, ValueError) as e:
+        # Fallback: remove problematic parameters
+        tsne_params.pop('method', None)
         if tsne_params.get('learning_rate') == 'auto':
             tsne_params['learning_rate'] = 200
+        try:
             tsne = TSNE(**tsne_params)
-        else:
-            raise
+        except Exception as e2:
+            print(f"Warning: Could not initialize t-SNE: {e2}")
+            print(f"Skipping t-SNE visualization for {dataset_name}")
+            return
 
-    z_2d = tsne.fit_transform(z)
-    plt.figure(figsize=(8, 6))
-    scatter = plt.scatter(z_2d[:, 0], z_2d[:, 1], c=labels, cmap='tab20', s=5)
-    plt.title(f"Latent Space t-SNE Visualization - {dataset_name.upper()}")
-    plt.colorbar(scatter)
-    plt.tight_layout()
-    plt.savefig(f"{output_dir}/{dataset_name}_tsne_visualization.png")
-    plt.close()
+    try:
+        # Force garbage collection before t-SNE
+        import gc
+        gc.collect()
+        
+        # Try to run t-SNE with error handling
+        try:
+            z_2d = tsne.fit_transform(z_sample)
+        except Exception as e:
+            # If t-SNE fails, try with even smaller sample
+            if len(z_sample) > 3000:
+                print(f"t-SNE failed with {len(z_sample)} samples, trying with 3000 samples...")
+                # Further reduce sample size
+                indices = np.random.choice(len(z_sample), size=3000, replace=False)
+                z_sample_small = z_sample[indices]
+                labels_sample_small = labels_sample[indices]
+                
+                # Adjust perplexity for smaller sample
+                safe_perplexity = min(30, max(5, len(z_sample_small) // 4))
+                
+                # Recreate tsne_params with safe values
+                tsne_params_small = {
+                    'n_components': 2,
+                    'perplexity': safe_perplexity,
+                    'random_state': 42,
+                    'init': 'pca',
+                    'method': 'barnes_hut'
+                }
+                
+                if 'learning_rate' in inspect.signature(TSNE.__init__).parameters:
+                    tsne_params_small['learning_rate'] = 200
+                    
+                if 'max_iter' in inspect.signature(TSNE.__init__).parameters:
+                    tsne_params_small['max_iter'] = 300
+                elif 'n_iter' in inspect.signature(TSNE.__init__).parameters:
+                    tsne_params_small['n_iter'] = 300
+                
+                try:
+                    tsne_small = TSNE(**tsne_params_small)
+                except (TypeError, ValueError):
+                    tsne_params_small.pop('method', None)
+                    tsne_small = TSNE(**tsne_params_small)
+                
+                z_2d = tsne_small.fit_transform(z_sample_small)
+                labels_sample = labels_sample_small
+            else:
+                raise
+        
+        plt.figure(figsize=(8, 6))
+        scatter = plt.scatter(z_2d[:, 0], z_2d[:, 1], c=labels_sample, cmap='tab20', s=5, alpha=0.6)
+        title = f"Latent Space t-SNE Visualization - {dataset_name.upper()}"
+        if len(z_sample) < len(z) if hasattr(z, '__len__') else False:
+            title += f"\n(Sampled: {len(z_sample):,}/{len(z):,} points)"
+        plt.title(title)
+        plt.colorbar(scatter)
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/{dataset_name}_tsne_visualization.png", dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # Clean up memory
+        del z_2d, z_sample, labels_sample, tsne
+        gc.collect()
+        
+    except BaseException as e:  # Catch all exceptions including MemoryError from C extensions
+        error_type = type(e).__name__
+        error_msg = str(e)
+        print(f"Warning: t-SNE visualization failed: {error_type}: {error_msg}")
+        print(f"Skipping t-SNE visualization for {dataset_name} to avoid memory issues")
+        # Skip visualization gracefully without crashing the pipeline
+        import gc
+        gc.collect()
 
 class EarlyStopping:
     def __init__(self, patience=3, delta=0):
@@ -173,7 +304,16 @@ def run_pipeline_with_files(hsi_path, gt_path, dataset_name, patch_size=16, late
 
     print(f"Extracted {len(patches)} patches with known labels (no redundancy).")
 
-    patches_tensor = torch.tensor(patches, dtype=torch.float32).reshape(-1, input_dim)
+    # Flatten patches: (N, patch_size, patch_size, channels) -> (N, patch_size * patch_size * channels)
+    patches_flat = patches.reshape(len(patches), -1)
+    
+    # Verify the flattened shape matches expected input_dim
+    actual_dim = patches_flat.shape[1]
+    if actual_dim != input_dim:
+        raise ValueError(f"Patch dimension mismatch: expected {input_dim}, got {actual_dim}. "
+                        f"Patch shape: {patches.shape}, patch_size: {patch_size}, pca_dim: {pca_dim}")
+    
+    patches_tensor = torch.tensor(patches_flat, dtype=torch.float32)
     dataset = TensorDataset(patches_tensor)
     batch_size = 512
     pin_memory = torch.cuda.is_available()

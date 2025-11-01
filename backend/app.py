@@ -26,19 +26,49 @@ app.config['MAX_CONTENT_LENGTH'] = 60 * 1024 * 1024  # 60MB max file size
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
-# Load pre-trained model
+# Load pre-trained model (optional - main pipeline trains its own models)
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'model', 'ae_transformer_model.pth')
 model = None
-try:
-    input_dim = 40
-    latent_dim = 32
-    model = AETransformer(input_dim=input_dim, latent_dim=latent_dim)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
-    model.eval()
-    logger.info(f"AETransformer model loaded successfully from {MODEL_PATH}")
-except Exception as e:
-    logger.error(f"Error loading AETransformer model from {MODEL_PATH}: {e}")
-    logger.error(traceback.format_exc())
+if os.path.exists(MODEL_PATH):
+    try:
+        input_dim = 40
+        latent_dim = 32
+        model = AETransformer(input_dim=input_dim, latent_dim=latent_dim)
+        # Try to load with strict=False to handle architecture mismatches
+        state_dict = torch.load(MODEL_PATH, map_location=torch.device('cpu'))
+        
+        # Check if the saved model matches current architecture
+        try:
+            model.load_state_dict(state_dict, strict=True)
+            model.eval()
+            logger.info(f"AETransformer model loaded successfully from {MODEL_PATH}")
+        except (RuntimeError, KeyError) as e:
+            # Architecture mismatch detected
+            error_str = str(e)
+            if "size mismatch" in error_str or "Missing key" in error_str or "Unexpected key" in error_str:
+                logger.warning(f"Pre-trained model architecture mismatch detected.")
+                logger.warning(f"Saved model has different layer sizes than current architecture.")
+                logger.warning(f"This is expected if the model was trained with different parameters.")
+                logger.info(f"Skipping pre-trained model load. The /upload and /classify endpoints will train new models.")
+                model = None
+            else:
+                # Try strict=False as last resort for other errors
+                try:
+                    model.load_state_dict(state_dict, strict=False)
+                    model.eval()
+                    logger.warning(f"Model loaded with compatible layers only. Some layers may be untrained.")
+                except Exception as e2:
+                    logger.warning(f"Could not load model: {e2}")
+                    logger.info(f"Skipping pre-trained model. Main endpoints will work normally.")
+                    model = None
+    except Exception as e:
+        logger.warning(f"Could not load pre-trained model from {MODEL_PATH}: {e}")
+        logger.warning(f"This is non-critical - the /upload and /classify endpoints train their own models.")
+        logger.debug(traceback.format_exc())
+        model = None
+else:
+    logger.info(f"Pre-trained model not found at {MODEL_PATH}. The /predict endpoint will not be available.")
+    logger.info(f"This is fine - the /upload and /classify endpoints train their own models.")
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -144,7 +174,10 @@ def upload_file():
 @app.route('/predict', methods=['POST'])
 def predict():
     if model is None:
-        return jsonify({'error': 'Model not loaded'}), 500
+        return jsonify({
+            'error': 'Pre-trained model not available',
+            'message': 'The pre-trained model could not be loaded. Please use /upload endpoint to train and process models, or /classify endpoint for classification with anomaly detection.'
+        }), 503  # 503 Service Unavailable
 
     data = request.get_json()
     if not data or 'input_data' not in data:
@@ -165,16 +198,25 @@ def predict():
         else:
             return jsonify({'error': 'Input data has invalid shape'}), 400
 
-        print(f"Input tensor shape for prediction: {input_tensor.shape}")
+        logger.debug(f"Input tensor shape for prediction: {input_tensor.shape}")
 
-        x_recon, z_trans = model.predict(input_tensor)  # Get reconstructed output and latent
+        # Get reconstructed output and latent features
+        x_recon, z_trans = model.predict(input_tensor)
+        # Ensure x_recon and input_tensor have matching shapes
+        if x_recon.shape != input_tensor.shape:
+            # Handle shape mismatches
+            min_dim = min(x_recon.shape[1], input_tensor.shape[1])
+            x_recon = x_recon[:, :min_dim]
+            input_tensor = input_tensor[:, :min_dim]
+            logger.warning(f"Shape mismatch detected. Using first {min_dim} dimensions.")
         # Compute reconstruction error (MSE) per sample
         recon_error = torch.mean((input_tensor - x_recon) ** 2, dim=1)
         prediction_list = recon_error.tolist()
 
-        print(f"Reconstruction error shape: {recon_error.shape}")
+        logger.debug(f"Reconstruction error shape: {recon_error.shape}")
     except Exception as e:
-        print(f"Prediction error: {str(e)}")  # Debugging output
+        logger.error(f"Prediction error: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
 
     return jsonify({'prediction': prediction_list})
@@ -231,13 +273,16 @@ def classify():
         classification_report_path = classification_results.get('classification_report_path')
         classification_report_url = f"{base_url}/uploads/{os.path.basename(classification_report_path)}" if classification_report_path else None
 
+        anomaly_stats = classification_results.get('anomaly_stats', {})
+
         return jsonify({
             'message': 'Classification completed',
             'classification_image_url': classification_image_url,
             'confusion_matrix_url': confusion_matrix_url,
             'tsne_image_url': tsne_image_url,
             'anomaly_score_map_url': anomaly_score_map_url,
-            'classification_report_url': classification_report_url
+            'classification_report_url': classification_report_url,
+            'anomaly_stats': anomaly_stats
         })
 
     except Exception as e:
